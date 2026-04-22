@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voicepath Visualizer</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+
+        #ui-container {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 10;
+            text-align: center;
+            transition: opacity 0.5s ease;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            text-shadow: 0 0 10px rgba(0, 255, 204, 0.5);
+        }
+
+        button {
+            background: transparent;
+            color: #00ffcc;
+            border: 2px solid #00ffcc;
+            padding: 15px 40px;
+            font-size: 1.5rem;
+            border-radius: 30px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 15px rgba(0, 255, 204, 0.3);
+        }
+
+        button:hover {
+            background: #00ffcc;
+            color: #000;
+            box-shadow: 0 0 25px rgba(0, 255, 204, 0.7);
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-container">
+        <h1>Voicepath</h1>
+        <button id="start-btn">Mikrofon starten</button>
+    </div>
+
+    <canvas id="visualizer"></canvas>
+
+    <script>
+        const canvas = document.getElementById('visualizer');
+        const ctx = canvas.getContext('2d');
+        const startBtn = document.getElementById('start-btn');
+        const uiContainer = document.getElementById('ui-container');
+
+        // Canvas an Fenstergröße anpassen
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        let audioContext;
+        let analyser;
+        let microphone;
+        let dataArray;
+
+        // Position für flüssige Bewegungen (Lerp)
+        let currentX = canvas.width / 2;
+        let currentY = canvas.height;
+        let targetX = canvas.width / 2;
+        let targetY = canvas.height;
+
+        // Start-Button Event
+        startBtn.addEventListener('click', async () => {
+            try {
+                // AudioContext initialisieren
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // Mikrofonzugriff anfragen
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                // Audio-Knoten verbinden
+                microphone = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                
+                // FFT-Größe (bestimmt die Auflösung der Frequenzanalyse)
+                analyser.fftSize = 2048;
+                analyser.smoothingTimeConstant = 0.8; // Glättet die Rohdaten etwas
+                
+                microphone.connect(analyser);
+                
+                // Array für Frequenzdaten erstellen
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+
+                // UI ausblenden und Animation starten
+                uiContainer.style.opacity = '0';
+                setTimeout(() => uiContainer.style.display = 'none', 500);
+                
+                // Das Canvas einmal komplett schwarz machen
+                ctx.fillStyle = '#000';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                draw();
+
+            } catch (err) {
+                alert('Fehler beim Zugriff auf das Mikrofon: ' + err.message);
+                console.error(err);
+            }
+        });
+
+        function draw() {
+            requestAnimationFrame(draw);
+
+            // Fading-Effekt für den Schweif
+            // Statt das Canvas zu löschen, malen wir ein leicht transparentes Schwarz darüber
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Achsen leicht andeuten (optional, damit das Koordinatensystem sichtbar bleibt)
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, canvas.height / 2);
+            ctx.lineTo(canvas.width, canvas.height / 2);
+            ctx.moveTo(canvas.width / 2, 0);
+            ctx.lineTo(canvas.width / 2, canvas.height);
+            ctx.stroke();
+
+            // Frequenzdaten holen
+            analyser.getByteFrequencyData(dataArray);
+
+            let sumVolume = 0;
+            let weightedSum = 0;
+            let totalWeight = 0;
+
+            // Wir analysieren nur den relevanten Bereich für Stimmen (die unteren ~100 Bins)
+            // Die Nyquist-Frequenz liegt bei ca. 22050 Hz. 1 Bin entspricht ca. 21.5 Hz.
+            // 150 Bins decken also etwa bis 3200 Hz ab.
+            const relevantBins = Math.min(150, dataArray.length);
+
+            for (let i = 0; i < relevantBins; i++) {
+                const amplitude = dataArray[i];
+                sumVolume += amplitude;
+                
+                if (amplitude > 0) {
+                    weightedSum += i * amplitude;
+                    totalWeight += amplitude;
+                }
+            }
+
+            // Durchschnittliche Lautstärke (Y-Achse) berechnen
+            const avgVolume = sumVolume / relevantBins;
+            
+            // "Schwerpunkt" der Frequenzen (Tonhöhe / X-Achse) berechnen
+            let spectralCentroid = 0;
+            if (totalWeight > 0) {
+                spectralCentroid = weightedSum / totalWeight;
+            }
+
+            // Wenn es sehr leise ist, zentrieren wir den Punkt sanft unten
+            if (avgVolume < 5) {
+                targetY = canvas.height - 20; // Fast ganz unten
+                // X bleibt ungefähr wo es war, bewegt sich ganz leicht zur Mitte
+                targetX = targetX + (canvas.width / 2 - targetX) * 0.01;
+            } else {
+                // Mapping: Tonhöhe auf X-Achse (0 bis canvas.width)
+                // Wir mappen den Schwerpunkt (0 bis ca. 80) auf die Bildschirmbreite
+                const maxExpectedCentroid = 80; 
+                let normalizedX = spectralCentroid / maxExpectedCentroid;
+                normalizedX = Math.max(0, Math.min(1, normalizedX)); // Begrenzen auf 0-1
+                targetX = normalizedX * canvas.width;
+
+                // Mapping: Lautstärke auf Y-Achse (unten bis oben)
+                // max amplitude ist 255
+                let normalizedY = avgVolume / 100; // 100 ist schon ziemlich laut als Durchschnitt
+                normalizedY = Math.max(0, Math.min(1, normalizedY)); // Begrenzen auf 0-1
+                targetY = canvas.height - (normalizedY * canvas.height);
+            }
+
+            // Lerp (Linear Interpolation) für organische, weiche Bewegungen
+            // Verringere die Zahlen (z.B. 0.05), um die Bewegung noch träger zu machen
+            currentX += (targetX - currentX) * 0.1;
+            currentY += (targetY - currentY) * 0.1;
+
+            // Farbe basierend auf der Position (X-Achse verändert den Farbton)
+            const hue = (currentX / canvas.width) * 360;
+            const color = `hsl(${hue}, 100%, 60%)`;
+
+            // Den leuchtenden Punkt zeichnen
+            ctx.beginPath();
+            ctx.arc(currentX, currentY, 8, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            
+            // Glow-Effekt
+            ctx.shadowBlur = 20;
+            ctx.shadowColor = color;
+            ctx.fill();
+            
+            // Kern des Punktes etwas heller
+            ctx.beginPath();
+            ctx.arc(currentX, currentY, 3, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff';
+            ctx.shadowBlur = 0;
+            ctx.fill();
+        }
+    </script>
+</body>
+</html>
