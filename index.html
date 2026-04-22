@@ -58,6 +58,22 @@
             top: 0;
             left: 0;
             z-index: 1;
+            cursor: grab;
+        }
+        canvas.dragging {
+            cursor: grabbing;
+        }
+
+        #drag-hint {
+            position: absolute;
+            bottom: 18px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 5;
+            color: rgba(255,255,255,0.35);
+            font-size: 0.85rem;
+            pointer-events: none;
+            display: none;
         }
     </style>
 </head>
@@ -69,12 +85,14 @@
     </div>
 
     <canvas id="visualizer"></canvas>
+    <div id="drag-hint" role="status" aria-live="polite" aria-label="Ziehen zum Drehen der Perspektive">Ziehen zum Drehen der Perspektive</div>
 
     <script>
         const canvas = document.getElementById('visualizer');
         const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
         const uiContainer = document.getElementById('ui-container');
+        const dragHint = document.getElementById('drag-hint');
 
         // Canvas an Fenstergröße anpassen
         function resizeCanvas() {
@@ -102,10 +120,55 @@
         // Schnelle Triller können 20–25 Bins/Frame erreichen; 22 deckt den typischen Bereich gut ab
         const MAX_PITCH_DELTA = 22;
 
-        // Fixer Kamerawinkel – keine automatische Rotation
-        const CAM_Y = Math.PI / 6;   // 30° horizontale Drehung (sieht alle 3 Achsen)
-        const CAM_X = Math.PI / 7;   // ~26° nach unten geneigt
+        // Kamerawinkel – per Maus/Touch-Drag veränderbar
+        let CAM_Y = Math.PI / 6;   // horizontale Drehung
+        let CAM_X = Math.PI / 7;   // vertikale Neigung
         const FOV = 680;
+
+        // Drag-Rotation
+        const DRAG_SENSITIVITY = 0.005;
+        let isDragging = false;
+        let lastMouseX = 0, lastMouseY = 0;
+
+        function applyDrag(clientX, clientY) {
+            CAM_Y += (clientX - lastMouseX) * DRAG_SENSITIVITY;
+            CAM_X += (clientY - lastMouseY) * DRAG_SENSITIVITY;
+            CAM_X = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, CAM_X));
+            lastMouseX = clientX;
+            lastMouseY = clientY;
+        }
+
+        canvas.addEventListener('mousedown', e => {
+            isDragging = true;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            canvas.classList.add('dragging');
+        });
+        window.addEventListener('mouseup', () => {
+            isDragging = false;
+            canvas.classList.remove('dragging');
+        });
+        window.addEventListener('mousemove', e => {
+            if (!isDragging) return;
+            applyDrag(e.clientX, e.clientY);
+        });
+
+        canvas.addEventListener('touchstart', e => {
+            if (e.touches.length === 1) {
+                isDragging = true;
+                lastMouseX = e.touches[0].clientX;
+                lastMouseY = e.touches[0].clientY;
+                canvas.classList.add('dragging');
+            }
+        }, { passive: true });
+        window.addEventListener('touchend', () => {
+            isDragging = false;
+            canvas.classList.remove('dragging');
+        }, { passive: true });
+        window.addEventListener('touchmove', e => {
+            if (!isDragging || e.touches.length !== 1) return;
+            applyDrag(e.touches[0].clientX, e.touches[0].clientY);
+        }, { passive: true });
 
         // Aktuelle und Ziel-Position des Punktes
         let currentX = 0, currentY = -BOX, currentZ = -BOX;
@@ -243,6 +306,7 @@
 
                 uiContainer.style.opacity = '0';
                 setTimeout(() => uiContainer.style.display = 'none', 500);
+                dragHint.style.display = 'block';
 
                 draw();
             } catch (err) {
