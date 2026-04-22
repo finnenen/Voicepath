@@ -14,7 +14,6 @@
             color: #fff;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             overflow: hidden;
-            perspective: 800px;
         }
 
         #ui-container {
@@ -90,209 +89,272 @@
         let microphone;
         let dataArray;
 
-        // 3D Positionen für flüssige Bewegungen
-        let currentX = 0;
-        let currentY = -200;
-        let currentZ = 0;
-        
-        let targetX = 0;
-        let targetY = -200;
-        let targetZ = 0;
+        // Würfel-Halbgröße: Ton bleibt innerhalb ±BOX auf jeder Achse
+        const BOX = 300;
 
-        let lastSpectralCentroid = 0;
-        
-        // Array für den leuchtenden 3D-Schweif
+        // Vogelgesang-Frequenzbereich in FFT-Bins
+        // Bei fftSize=2048 und ~44100 Hz: jeder Bin ≈ 21,5 Hz
+        // Vögel singen typisch 1000–7000 Hz → Bins ~47–326
+        const BIRD_MIN_BIN = 45;
+        const BIRD_MAX_BIN = 320;
+
+        // Fixer Kamerawinkel – keine automatische Rotation
+        const CAM_Y = Math.PI / 6;   // 30° horizontale Drehung (sieht alle 3 Achsen)
+        const CAM_X = Math.PI / 7;   // ~26° nach unten geneigt
+        const FOV = 680;
+
+        // Aktuelle und Ziel-Position des Punktes
+        let currentX = 0, currentY = -BOX, currentZ = -BOX;
+        let targetX = 0,  targetY = -BOX, targetZ = -BOX;
+
+        let lastSpectralCentroid = BIRD_MIN_BIN;
+
+        // Schweif
         const trail = [];
-        const MAX_TRAIL_LENGTH = 150; // Länge der Achterbahn-Spur
+        const MAX_TRAIL_LENGTH = 120;
 
-        // Kamera-Setup (für den 3D-Raum)
-        const fov = 600; // Sichtfeld (Zoom)
-        const cameraTiltX = 0.3; // Neigung der Kamera nach unten (im Bogenmaß)
-        const cameraYOffset = 300; // Kamera etwas anheben, um besser in die Tiefe zu blicken
+        // 3D → 2D Projektion mit fixer Kamera (Y-Flip: oben = positiv)
+        function project3D(x, y, z) {
+            // Szene um Y-Achse drehen (horizontale Perspektive)
+            const cosY = Math.cos(CAM_Y);
+            const sinY = Math.sin(CAM_Y);
+            const rx = x * cosY + z * sinY;
+            const ry = y;
+            const rz = -x * sinY + z * cosY;
+
+            // Szene um X-Achse kippen (von oben schauen)
+            const cosX = Math.cos(CAM_X);
+            const sinX = Math.sin(CAM_X);
+            const fx = rx;
+            const fy = ry * cosX - rz * sinX;
+            const fz = ry * sinX + rz * cosX;
+
+            // Perspektivische Projektion
+            const depth = FOV + fz;
+            if (depth <= 1) return null;
+            const scale = FOV / depth;
+            return {
+                x: fx * scale + canvas.width / 2,
+                y: -fy * scale + canvas.height / 2,  // Y umkehren: oben = positiv
+                scale: scale
+            };
+        }
+
+        // Linie zwischen zwei 3D-Punkten zeichnen
+        function drawLine3D(x1, y1, z1, x2, y2, z2, style, lineWidth) {
+            const p1 = project3D(x1, y1, z1);
+            const p2 = project3D(x2, y2, z2);
+            if (!p1 || !p2) return;
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.strokeStyle = style;
+            ctx.lineWidth = lineWidth || 1;
+            ctx.stroke();
+        }
+
+        // Text an einer 3D-Position zeichnen (feste Schriftgröße für Lesbarkeit)
+        function drawText3D(text, x, y, z, color, fontSize) {
+            const p = project3D(x, y, z);
+            if (!p) return;
+            ctx.font = `bold ${fontSize || 13}px 'Segoe UI', sans-serif`;
+            ctx.fillStyle = color;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowBlur = 6;
+            ctx.shadowColor = color;
+            ctx.fillText(text, p.x, p.y);
+            ctx.shadowBlur = 0;
+        }
+
+        // Würfelrahmen (12 Kanten)
+        function drawBox() {
+            const B = BOX;
+            const style = 'rgba(255,255,255,0.2)';
+            // Vordere Fläche (z = -B)
+            drawLine3D(-B, -B, -B,  B, -B, -B, style);
+            drawLine3D( B, -B, -B,  B,  B, -B, style);
+            drawLine3D( B,  B, -B, -B,  B, -B, style);
+            drawLine3D(-B,  B, -B, -B, -B, -B, style);
+            // Hintere Fläche (z = +B)
+            drawLine3D(-B, -B,  B,  B, -B,  B, style);
+            drawLine3D( B, -B,  B,  B,  B,  B, style);
+            drawLine3D( B,  B,  B, -B,  B,  B, style);
+            drawLine3D(-B,  B,  B, -B, -B,  B, style);
+            // Verbindungskanten
+            drawLine3D(-B, -B, -B, -B, -B,  B, style);
+            drawLine3D( B, -B, -B,  B, -B,  B, style);
+            drawLine3D( B,  B, -B,  B,  B,  B, style);
+            drawLine3D(-B,  B, -B, -B,  B,  B, style);
+        }
+
+        // Farbige Achsen mit Beschriftungen
+        function drawAxes() {
+            const B = BOX;
+            const EXT = B + 55; // Achse etwas über den Würfel hinaus verlängern
+
+            ctx.shadowBlur = 0;
+
+            // X-Achse – Frequenz (cyan)
+            drawLine3D(-EXT, 0, 0, EXT, 0, 0, '#00ffcc', 1.5);
+            drawText3D('Frequenz →', EXT + 15, 0, 0, '#00ffcc', 13);
+            drawText3D('tief', -EXT - 10, 0, 0, '#00ffcc', 11);
+
+            // Y-Achse – Lautstärke (gelb)
+            drawLine3D(0, -EXT, 0, 0, EXT, 0, '#ffcc00', 1.5);
+            drawText3D('Lautstärke ↑', 0, EXT + 18, 0, '#ffcc00', 13);
+            drawText3D('leise', 0, -EXT - 10, 0, '#ffcc00', 11);
+
+            // Z-Achse – Variation (magenta)
+            drawLine3D(0, 0, -EXT, 0, 0, EXT, '#ff66cc', 1.5);
+            drawText3D('Variation', 0, 0, EXT + 20, '#ff66cc', 13);
+            drawText3D('stabil', 0, 0, -EXT - 15, '#ff66cc', 11);
+        }
+
+        // Subtiles Bodenraster (Y = -BOX) für räumliche Orientierung
+        function drawFloorGrid() {
+            const B = BOX;
+            const steps = 4;
+            const step = (2 * B) / steps;
+            for (let i = 1; i < steps; i++) {
+                const o = -B + i * step;
+                drawLine3D( o, -B, -B,  o, -B,  B, 'rgba(255,255,255,0.07)');
+                drawLine3D(-B, -B,  o,  B, -B,  o, 'rgba(255,255,255,0.07)');
+            }
+        }
 
         startBtn.addEventListener('click', async () => {
             try {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                
+
                 microphone = audioContext.createMediaStreamSource(stream);
                 analyser = audioContext.createAnalyser();
-                
                 analyser.fftSize = 2048;
-                analyser.smoothingTimeConstant = 0.8;
-                
+                analyser.smoothingTimeConstant = 0.75;
                 microphone.connect(analyser);
-                
+
                 const bufferLength = analyser.frequencyBinCount;
                 dataArray = new Uint8Array(bufferLength);
 
                 uiContainer.style.opacity = '0';
                 setTimeout(() => uiContainer.style.display = 'none', 500);
-                
-                draw();
 
+                draw();
             } catch (err) {
                 alert('Fehler beim Zugriff auf das Mikrofon: ' + err.message);
                 console.error(err);
             }
         });
 
-        // Hilfsfunktion: 3D zu 2D Projektion (mit Kameraneigung)
-        function project3D(x, y, z) {
-            // Kamera-Offset anwenden
-            y -= cameraYOffset;
-
-            // Rotation um die X-Achse (Kameraneigung)
-            const cosT = Math.cos(cameraTiltX);
-            const sinT = Math.sin(cameraTiltX);
-            const rotatedY = y * cosT - z * sinT;
-            const rotatedZ = y * sinT + z * cosT;
-
-            // Perspektivische Projektion
-            const scale = fov / (fov + rotatedZ);
-            const screenX = x * scale + canvas.width / 2;
-            const screenY = rotatedY * scale + canvas.height / 2;
-            
-            return { x: screenX, y: screenY, scale: scale, z: rotatedZ };
-        }
-
         function draw() {
             requestAnimationFrame(draw);
 
-            // Canvas leeren für das neue Frame (komplett schwarz, der Schweif wird aus dem Array gezeichnet)
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-            // Raster/Raum-Andeutung (optional, um Tiefe besser zu spüren)
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
-            ctx.lineWidth = 1;
-            for (let i = -1000; i <= 1000; i += 200) {
-                let p1 = project3D(i, -300, 0);
-                let p2 = project3D(i, -300, 2000);
-                ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-                
-                let p3 = project3D(-1000, -300, i > 0 ? i : 0);
-                let p4 = project3D(1000, -300, i > 0 ? i : 0);
-                ctx.beginPath(); ctx.moveTo(p3.x, p3.y); ctx.lineTo(p4.x, p4.y); ctx.stroke();
-            }
+            ctx.shadowBlur = 0;
+            drawBox();
+            drawFloorGrid();
+            drawAxes();
 
+            // Audio-Daten auswerten (nur Vogelgesang-Frequenzbereich)
             analyser.getByteFrequencyData(dataArray);
 
             let sumVolume = 0;
             let weightedSum = 0;
             let totalWeight = 0;
-            const relevantBins = Math.min(150, dataArray.length);
 
-            for (let i = 0; i < relevantBins; i++) {
-                const amplitude = dataArray[i];
-                sumVolume += amplitude;
-                
-                if (amplitude > 0) {
-                    weightedSum += i * amplitude;
-                    totalWeight += amplitude;
+            for (let i = BIRD_MIN_BIN; i <= BIRD_MAX_BIN; i++) {
+                const amp = dataArray[i];
+                sumVolume += amp;
+                if (amp > 0) {
+                    weightedSum += i * amp;
+                    totalWeight += amp;
                 }
             }
 
-            const avgVolume = sumVolume / relevantBins;
-            let spectralCentroid = 0;
+            const binCount = BIRD_MAX_BIN - BIRD_MIN_BIN + 1;
+            const avgVolume = sumVolume / binCount;
+            let spectralCentroid = (BIRD_MIN_BIN + BIRD_MAX_BIN) / 2;
             if (totalWeight > 0) {
                 spectralCentroid = weightedSum / totalWeight;
             }
 
-            // NEU: Berechnung der Schwankung (Z-Achse)
-            // Wie stark hat sich die Tonhöhe im Vergleich zum letzten Frame verändert?
+            // Pitch-Variation (Z-Achse): wie schnell ändert sich die Tonhöhe?
             const pitchDelta = Math.abs(spectralCentroid - lastSpectralCentroid);
             lastSpectralCentroid = spectralCentroid;
 
-            if (avgVolume < 5) {
-                // Bei Stille: Punkt fällt sanft nach unten und kommt nach vorne
-                targetY = -300; 
-                targetX = targetX * 0.95; // Zur Mitte gleiten
-                targetZ = 0;
+            if (avgVolume < 3) {
+                // Stille: langsam zurück zur Ruheposition
+                targetX += (0 - targetX) * 0.04;
+                targetY = -BOX;
+                targetZ += (-BOX - targetZ) * 0.04;
             } else {
-                // X-Achse (Tonhöhe)
-                const maxExpectedCentroid = 80; 
-                let normalizedX = spectralCentroid / maxExpectedCentroid;
-                normalizedX = Math.max(0, Math.min(1, normalizedX));
-                targetX = (normalizedX - 0.5) * 1200; // Breite im 3D Raum von -600 bis +600
+                // X-Achse: spektraler Schwerpunkt → Tonhöhe/-farbe
+                // Vogelbereich: BIRD_MIN_BIN … BIRD_MAX_BIN → -BOX … +BOX
+                const normX = (spectralCentroid - BIRD_MIN_BIN) / (BIRD_MAX_BIN - BIRD_MIN_BIN);
+                targetX = Math.max(-BOX, Math.min(BOX, (normX - 0.5) * 2 * BOX));
 
-                // Y-Achse (Lautstärke)
-                let normalizedY = avgVolume / 100;
-                normalizedY = Math.max(0, Math.min(1, normalizedY));
-                targetY = -300 + (normalizedY * 800); // Höhe im 3D Raum von -300 bis +500
+                // Y-Achse: Lautstärke (0–100 → -BOX … +BOX)
+                // Typische Vogelrufe erreichen avgVolume ≈ 20–80 im Vogelbereich
+                const normY = Math.min(1, avgVolume / 80);
+                targetY = Math.max(-BOX, Math.min(BOX, normY * 2 * BOX - BOX));
 
-                // Z-Achse (Ton-Schwankung)
-                // Hohes Delta = tiefer in den Raum hineinspringen
-                const targetDepth = pitchDelta * 300; // Multiplikator für die Empfindlichkeit
-                targetZ = Math.min(targetDepth, 2500); // Maximal 2500 Einheiten in die Tiefe
+                // Z-Achse: Frequenzvariation (0–25 Bins/Frame → -BOX … +BOX)
+                // Vogelgezwitscher hat oft schnelle Frequenzsprünge
+                const normZ = Math.min(1, pitchDelta / 22);
+                targetZ = Math.max(-BOX, Math.min(BOX, normZ * 2 * BOX - BOX));
             }
 
-            // Lerp (Trägheit für sanfte Achterbahn-Bewegungen)
-            currentX += (targetX - currentX) * 0.1;
-            currentY += (targetY - currentY) * 0.1;
-            // Z-Achse etwas schneller reagieren lassen für knackigere Sprünge nach hinten
-            currentZ += (targetZ - currentZ) * 0.15; 
+            // Sanfte Interpolation (Trägheit)
+            currentX += (targetX - currentX) * 0.12;
+            currentY += (targetY - currentY) * 0.12;
+            currentZ += (targetZ - currentZ) * 0.18;
 
-            // Farbe basierend auf X- und Z-Achse leicht variieren
-            const hue = ((currentX + 600) / 1200) * 360;
-            
-            // Aktuelle Position in den Trail-Array pushen
+            // Farbe nach Position im Vogelfrequenzbereich (cyan → gelb → magenta)
+            const hue = ((currentX + BOX) / (2 * BOX)) * 200 + 140;
+
+            // Schweif aufzeichnen (keine z-Drift mehr, Position bleibt stabil)
             trail.push({ x: currentX, y: currentY, z: currentZ, hue: hue });
-            if (trail.length > MAX_TRAIL_LENGTH) {
-                trail.shift();
-            }
+            if (trail.length > MAX_TRAIL_LENGTH) trail.shift();
 
-            // Trail (Achterbahn-Spur) zeichnen
-            for (let i = 0; i < trail.length - 1; i++) {
-                const point1 = trail[i];
-                const point2 = trail[i + 1];
+            // Schweif zeichnen
+            for (let i = 1; i < trail.length; i++) {
+                const p1 = trail[i - 1];
+                const p2 = trail[i];
+                const proj1 = project3D(p1.x, p1.y, p1.z);
+                const proj2 = project3D(p2.x, p2.y, p2.z);
+                if (!proj1 || !proj2) continue;
 
-                // Trailpunkte bewegen sich langsam auf den Betrachter zu, damit es dynamischer wirkt (optional)
-                point1.z -= 2;
-
-                const proj1 = project3D(point1.x, point1.y, point1.z);
-                const proj2 = project3D(point2.x, point2.y, point2.z);
-
-                // Punkte hinter der Kamera nicht zeichnen
-                if (proj1.z <= -fov || proj2.z <= -fov) continue;
-
-                // Transparenz basierend auf dem Alter des Punktes im Array
-                const alpha = (i / trail.length);
-                const color = `hsla(${point1.hue}, 100%, 60%, ${alpha})`;
-
+                const alpha = i / trail.length;
                 ctx.beginPath();
                 ctx.moveTo(proj1.x, proj1.y);
                 ctx.lineTo(proj2.x, proj2.y);
-                
-                // Linienbreite basierend auf der Tiefe skalieren (Punkte vorne sind dicker)
-                ctx.lineWidth = Math.max(0.5, 12 * proj1.scale * alpha);
-                ctx.strokeStyle = color;
-                
-                ctx.shadowBlur = 10 * proj1.scale;
-                ctx.shadowColor = `hsl(${point1.hue}, 100%, 60%)`;
-                
+                ctx.strokeStyle = `hsla(${p1.hue}, 100%, 65%, ${alpha * 0.9})`;
+                ctx.lineWidth = Math.max(0.5, 10 * proj1.scale * alpha);
+                ctx.shadowBlur = 8 * proj1.scale;
+                ctx.shadowColor = `hsl(${p1.hue}, 100%, 65%)`;
                 ctx.stroke();
             }
 
-            // Den aktuellen vordersten "leuchtenden Kopf" zeichnen
+            // Leuchtender Kopf (aktueller Tonpunkt)
             if (trail.length > 0) {
                 const head = trail[trail.length - 1];
-                const projHead = project3D(head.x, head.y, head.z);
-
-                if (projHead.z > -fov) {
+                const ph = project3D(head.x, head.y, head.z);
+                if (ph) {
                     const headColor = `hsl(${head.hue}, 100%, 70%)`;
-                    ctx.beginPath();
-                    ctx.arc(projHead.x, projHead.y, Math.max(1, 15 * projHead.scale), 0, Math.PI * 2);
-                    ctx.fillStyle = headColor;
-                    ctx.shadowBlur = 30 * projHead.scale;
+                    ctx.shadowBlur = 25 * ph.scale;
                     ctx.shadowColor = headColor;
+                    ctx.beginPath();
+                    ctx.arc(ph.x, ph.y, Math.max(2, 14 * ph.scale), 0, Math.PI * 2);
+                    ctx.fillStyle = headColor;
                     ctx.fill();
 
-                    // Weißer Kern
-                    ctx.beginPath();
-                    ctx.arc(projHead.x, projHead.y, Math.max(1, 5 * projHead.scale), 0, Math.PI * 2);
-                    ctx.fillStyle = '#fff';
                     ctx.shadowBlur = 0;
+                    ctx.beginPath();
+                    ctx.arc(ph.x, ph.y, Math.max(1, 4 * ph.scale), 0, Math.PI * 2);
+                    ctx.fillStyle = '#fff';
                     ctx.fill();
                 }
             }
