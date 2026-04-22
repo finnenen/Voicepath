@@ -94,9 +94,13 @@
 
         // Vogelgesang-Frequenzbereich in FFT-Bins
         // Bei fftSize=2048 und ~44100 Hz: jeder Bin ≈ 21,5 Hz
-        // Vögel singen typisch 1000–7000 Hz → Bins ~47–326
+        // Vögel singen typisch ~970–6880 Hz → Bins ~45–320
         const BIRD_MIN_BIN = 45;
         const BIRD_MAX_BIN = 320;
+
+        // Maximale erwartete Frequenzänderung pro Frame (in Bins) für Vogelgezwitscher
+        // Schnelle Triller können 20–25 Bins/Frame erreichen; 22 deckt den typischen Bereich gut ab
+        const MAX_PITCH_DELTA = 22;
 
         // Fixer Kamerawinkel – keine automatische Rotation
         const CAM_Y = Math.PI / 6;   // 30° horizontale Drehung (sieht alle 3 Achsen)
@@ -107,7 +111,7 @@
         let currentX = 0, currentY = -BOX, currentZ = -BOX;
         let targetX = 0,  targetY = -BOX, targetZ = -BOX;
 
-        let lastSpectralCentroid = BIRD_MIN_BIN;
+        let lastSpectralCentroid = (BIRD_MIN_BIN + BIRD_MAX_BIN) / 2;
 
         // Schweif
         const trail = [];
@@ -303,7 +307,7 @@
 
                 // Z-Achse: Frequenzvariation (0–25 Bins/Frame → -BOX … +BOX)
                 // Vogelgezwitscher hat oft schnelle Frequenzsprünge
-                const normZ = Math.min(1, pitchDelta / 22);
+                const normZ = Math.min(1, pitchDelta / MAX_PITCH_DELTA);
                 targetZ = Math.max(-BOX, Math.min(BOX, normZ * 2 * BOX - BOX));
             }
 
