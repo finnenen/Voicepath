@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voicepath Visualizer</title>
+    <title>Voicepath Visualizer 3D</title>
     <style>
         body, html {
             margin: 0;
@@ -14,6 +14,7 @@
             color: #fff;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             overflow: hidden;
+            perspective: 800px;
         }
 
         #ui-container {
@@ -64,7 +65,7 @@
 <body>
 
     <div id="ui-container">
-        <h1>Voicepath</h1>
+        <h1>Voicepath 3D</h1>
         <button id="start-btn">Mikrofon starten</button>
     </div>
 
@@ -89,42 +90,44 @@
         let microphone;
         let dataArray;
 
-        // Position für flüssige Bewegungen (Lerp)
-        let currentX = canvas.width / 2;
-        let currentY = canvas.height;
-        let targetX = canvas.width / 2;
-        let targetY = canvas.height;
+        // 3D Positionen für flüssige Bewegungen
+        let currentX = 0;
+        let currentY = -200;
+        let currentZ = 0;
+        
+        let targetX = 0;
+        let targetY = -200;
+        let targetZ = 0;
 
-        // Start-Button Event
+        let lastSpectralCentroid = 0;
+        
+        // Array für den leuchtenden 3D-Schweif
+        const trail = [];
+        const MAX_TRAIL_LENGTH = 150; // Länge der Achterbahn-Spur
+
+        // Kamera-Setup (für den 3D-Raum)
+        const fov = 600; // Sichtfeld (Zoom)
+        const cameraTiltX = 0.3; // Neigung der Kamera nach unten (im Bogenmaß)
+        const cameraYOffset = 300; // Kamera etwas anheben, um besser in die Tiefe zu blicken
+
         startBtn.addEventListener('click', async () => {
             try {
-                // AudioContext initialisieren
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                
-                // Mikrofonzugriff anfragen
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 
-                // Audio-Knoten verbinden
                 microphone = audioContext.createMediaStreamSource(stream);
                 analyser = audioContext.createAnalyser();
                 
-                // FFT-Größe (bestimmt die Auflösung der Frequenzanalyse)
                 analyser.fftSize = 2048;
-                analyser.smoothingTimeConstant = 0.8; // Glättet die Rohdaten etwas
+                analyser.smoothingTimeConstant = 0.8;
                 
                 microphone.connect(analyser);
                 
-                // Array für Frequenzdaten erstellen
                 const bufferLength = analyser.frequencyBinCount;
                 dataArray = new Uint8Array(bufferLength);
 
-                // UI ausblenden und Animation starten
                 uiContainer.style.opacity = '0';
                 setTimeout(() => uiContainer.style.display = 'none', 500);
-                
-                // Das Canvas einmal komplett schwarz machen
-                ctx.fillStyle = '#000';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
                 
                 draw();
 
@@ -134,34 +137,50 @@
             }
         });
 
+        // Hilfsfunktion: 3D zu 2D Projektion (mit Kameraneigung)
+        function project3D(x, y, z) {
+            // Kamera-Offset anwenden
+            y -= cameraYOffset;
+
+            // Rotation um die X-Achse (Kameraneigung)
+            const cosT = Math.cos(cameraTiltX);
+            const sinT = Math.sin(cameraTiltX);
+            const rotatedY = y * cosT - z * sinT;
+            const rotatedZ = y * sinT + z * cosT;
+
+            // Perspektivische Projektion
+            const scale = fov / (fov + rotatedZ);
+            const screenX = x * scale + canvas.width / 2;
+            const screenY = rotatedY * scale + canvas.height / 2;
+            
+            return { x: screenX, y: screenY, scale: scale, z: rotatedZ };
+        }
+
         function draw() {
             requestAnimationFrame(draw);
 
-            // Fading-Effekt für den Schweif
-            // Statt das Canvas zu löschen, malen wir ein leicht transparentes Schwarz darüber
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+            // Canvas leeren für das neue Frame (komplett schwarz, der Schweif wird aus dem Array gezeichnet)
+            ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-            // Achsen leicht andeuten (optional, damit das Koordinatensystem sichtbar bleibt)
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            // Raster/Raum-Andeutung (optional, um Tiefe besser zu spüren)
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
             ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(0, canvas.height / 2);
-            ctx.lineTo(canvas.width, canvas.height / 2);
-            ctx.moveTo(canvas.width / 2, 0);
-            ctx.lineTo(canvas.width / 2, canvas.height);
-            ctx.stroke();
+            for (let i = -1000; i <= 1000; i += 200) {
+                let p1 = project3D(i, -300, 0);
+                let p2 = project3D(i, -300, 2000);
+                ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+                
+                let p3 = project3D(-1000, -300, i > 0 ? i : 0);
+                let p4 = project3D(1000, -300, i > 0 ? i : 0);
+                ctx.beginPath(); ctx.moveTo(p3.x, p3.y); ctx.lineTo(p4.x, p4.y); ctx.stroke();
+            }
 
-            // Frequenzdaten holen
             analyser.getByteFrequencyData(dataArray);
 
             let sumVolume = 0;
             let weightedSum = 0;
             let totalWeight = 0;
-
-            // Wir analysieren nur den relevanten Bereich für Stimmen (die unteren ~100 Bins)
-            // Die Nyquist-Frequenz liegt bei ca. 22050 Hz. 1 Bin entspricht ca. 21.5 Hz.
-            // 150 Bins decken also etwa bis 3200 Hz ab.
             const relevantBins = Math.min(150, dataArray.length);
 
             for (let i = 0; i < relevantBins; i++) {
@@ -174,60 +193,109 @@
                 }
             }
 
-            // Durchschnittliche Lautstärke (Y-Achse) berechnen
             const avgVolume = sumVolume / relevantBins;
-            
-            // "Schwerpunkt" der Frequenzen (Tonhöhe / X-Achse) berechnen
             let spectralCentroid = 0;
             if (totalWeight > 0) {
                 spectralCentroid = weightedSum / totalWeight;
             }
 
-            // Wenn es sehr leise ist, zentrieren wir den Punkt sanft unten
+            // NEU: Berechnung der Schwankung (Z-Achse)
+            // Wie stark hat sich die Tonhöhe im Vergleich zum letzten Frame verändert?
+            const pitchDelta = Math.abs(spectralCentroid - lastSpectralCentroid);
+            lastSpectralCentroid = spectralCentroid;
+
             if (avgVolume < 5) {
-                targetY = canvas.height - 20; // Fast ganz unten
-                // X bleibt ungefähr wo es war, bewegt sich ganz leicht zur Mitte
-                targetX = targetX + (canvas.width / 2 - targetX) * 0.01;
+                // Bei Stille: Punkt fällt sanft nach unten und kommt nach vorne
+                targetY = -300; 
+                targetX = targetX * 0.95; // Zur Mitte gleiten
+                targetZ = 0;
             } else {
-                // Mapping: Tonhöhe auf X-Achse (0 bis canvas.width)
-                // Wir mappen den Schwerpunkt (0 bis ca. 80) auf die Bildschirmbreite
+                // X-Achse (Tonhöhe)
                 const maxExpectedCentroid = 80; 
                 let normalizedX = spectralCentroid / maxExpectedCentroid;
-                normalizedX = Math.max(0, Math.min(1, normalizedX)); // Begrenzen auf 0-1
-                targetX = normalizedX * canvas.width;
+                normalizedX = Math.max(0, Math.min(1, normalizedX));
+                targetX = (normalizedX - 0.5) * 1200; // Breite im 3D Raum von -600 bis +600
 
-                // Mapping: Lautstärke auf Y-Achse (unten bis oben)
-                // max amplitude ist 255
-                let normalizedY = avgVolume / 100; // 100 ist schon ziemlich laut als Durchschnitt
-                normalizedY = Math.max(0, Math.min(1, normalizedY)); // Begrenzen auf 0-1
-                targetY = canvas.height - (normalizedY * canvas.height);
+                // Y-Achse (Lautstärke)
+                let normalizedY = avgVolume / 100;
+                normalizedY = Math.max(0, Math.min(1, normalizedY));
+                targetY = -300 + (normalizedY * 800); // Höhe im 3D Raum von -300 bis +500
+
+                // Z-Achse (Ton-Schwankung)
+                // Hohes Delta = tiefer in den Raum hineinspringen
+                const targetDepth = pitchDelta * 300; // Multiplikator für die Empfindlichkeit
+                targetZ = Math.min(targetDepth, 2500); // Maximal 2500 Einheiten in die Tiefe
             }
 
-            // Lerp (Linear Interpolation) für organische, weiche Bewegungen
-            // Verringere die Zahlen (z.B. 0.05), um die Bewegung noch träger zu machen
+            // Lerp (Trägheit für sanfte Achterbahn-Bewegungen)
             currentX += (targetX - currentX) * 0.1;
             currentY += (targetY - currentY) * 0.1;
+            // Z-Achse etwas schneller reagieren lassen für knackigere Sprünge nach hinten
+            currentZ += (targetZ - currentZ) * 0.15; 
 
-            // Farbe basierend auf der Position (X-Achse verändert den Farbton)
-            const hue = (currentX / canvas.width) * 360;
-            const color = `hsl(${hue}, 100%, 60%)`;
+            // Farbe basierend auf X- und Z-Achse leicht variieren
+            const hue = ((currentX + 600) / 1200) * 360;
+            
+            // Aktuelle Position in den Trail-Array pushen
+            trail.push({ x: currentX, y: currentY, z: currentZ, hue: hue });
+            if (trail.length > MAX_TRAIL_LENGTH) {
+                trail.shift();
+            }
 
-            // Den leuchtenden Punkt zeichnen
-            ctx.beginPath();
-            ctx.arc(currentX, currentY, 8, 0, Math.PI * 2);
-            ctx.fillStyle = color;
-            
-            // Glow-Effekt
-            ctx.shadowBlur = 20;
-            ctx.shadowColor = color;
-            ctx.fill();
-            
-            // Kern des Punktes etwas heller
-            ctx.beginPath();
-            ctx.arc(currentX, currentY, 3, 0, Math.PI * 2);
-            ctx.fillStyle = '#fff';
-            ctx.shadowBlur = 0;
-            ctx.fill();
+            // Trail (Achterbahn-Spur) zeichnen
+            for (let i = 0; i < trail.length - 1; i++) {
+                const point1 = trail[i];
+                const point2 = trail[i + 1];
+
+                // Trailpunkte bewegen sich langsam auf den Betrachter zu, damit es dynamischer wirkt (optional)
+                point1.z -= 2;
+
+                const proj1 = project3D(point1.x, point1.y, point1.z);
+                const proj2 = project3D(point2.x, point2.y, point2.z);
+
+                // Punkte hinter der Kamera nicht zeichnen
+                if (proj1.z <= -fov || proj2.z <= -fov) continue;
+
+                // Transparenz basierend auf dem Alter des Punktes im Array
+                const alpha = (i / trail.length);
+                const color = `hsla(${point1.hue}, 100%, 60%, ${alpha})`;
+
+                ctx.beginPath();
+                ctx.moveTo(proj1.x, proj1.y);
+                ctx.lineTo(proj2.x, proj2.y);
+                
+                // Linienbreite basierend auf der Tiefe skalieren (Punkte vorne sind dicker)
+                ctx.lineWidth = Math.max(0.5, 12 * proj1.scale * alpha);
+                ctx.strokeStyle = color;
+                
+                ctx.shadowBlur = 10 * proj1.scale;
+                ctx.shadowColor = `hsl(${point1.hue}, 100%, 60%)`;
+                
+                ctx.stroke();
+            }
+
+            // Den aktuellen vordersten "leuchtenden Kopf" zeichnen
+            if (trail.length > 0) {
+                const head = trail[trail.length - 1];
+                const projHead = project3D(head.x, head.y, head.z);
+
+                if (projHead.z > -fov) {
+                    const headColor = `hsl(${head.hue}, 100%, 70%)`;
+                    ctx.beginPath();
+                    ctx.arc(projHead.x, projHead.y, Math.max(1, 15 * projHead.scale), 0, Math.PI * 2);
+                    ctx.fillStyle = headColor;
+                    ctx.shadowBlur = 30 * projHead.scale;
+                    ctx.shadowColor = headColor;
+                    ctx.fill();
+
+                    // Weißer Kern
+                    ctx.beginPath();
+                    ctx.arc(projHead.x, projHead.y, Math.max(1, 5 * projHead.scale), 0, Math.PI * 2);
+                    ctx.fillStyle = '#fff';
+                    ctx.shadowBlur = 0;
+                    ctx.fill();
+                }
+            }
         }
     </script>
 </body>
